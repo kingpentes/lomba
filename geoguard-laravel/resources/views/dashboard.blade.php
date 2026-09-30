@@ -1,20 +1,15 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GeoGuard - EWS Dashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = { darkMode: 'class', theme: { extend: { colors: { slate: { 950: '#020617' } } } } }
-    </script>
+@extends('layouts.app')
+
+@section('title', 'EWS Dashboard')
+
+@push('head')
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
-        body { background-color: #020617; color: white; overflow: hidden; margin: 0; padding: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif; }
-        .bento-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 1rem; height: 100vh; padding: 1rem; box-sizing: border-box; }
-        .col-span-2-module { grid-column: span 2; }
+        /* Navbar is h-14 = 3.5rem, so subtract it from 100vh */
+        .bento-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: auto 1fr; gap: 1rem; height: calc(100vh - 3.5rem); padding: 1rem; box-sizing: border-box; }
+        .col-span-3-module { grid-column: span 3; }
         .module { background-color: #0f172a; border: 1px solid #1e293b; border-radius: 0.75rem; padding: 1rem; display: flex; flex-direction: column; overflow: hidden; }
         .pulse-border { animation: pulseRed 2s infinite; }
         @keyframes pulseRed { 0% { box-shadow: inset 0 0 10px rgba(239, 68, 68, 0.2), 0 0 0 2px rgba(239, 68, 68, 0.5); border-color: rgba(239, 68, 68, 0.8); } 50% { box-shadow: inset 0 0 30px rgba(239, 68, 68, 0.8), 0 0 0 4px rgba(239, 68, 68, 0.8); border-color: rgba(239, 68, 68, 1); } 100% { box-shadow: inset 0 0 10px rgba(239, 68, 68, 0.2), 0 0 0 2px rgba(239, 68, 68, 0.5); border-color: rgba(239, 68, 68, 0.8); } }
@@ -23,15 +18,22 @@
         .normal-marker { width: 16px; height: 16px; background: rgba(34, 197, 94, 0.8); border-radius: 50%; border: 2px solid white; }
         @keyframes mapPulse { 0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { transform: scale(1); box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); } 100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
     </style>
-</head>
-<body>
+@endpush
+
+@section('content')
     <div id="hud" class="bento-grid">
         <!-- Module A: Telemetry -->
         <div class="module">
-            <h2 class="text-lg font-bold mb-2 text-slate-400">CORE TELEMETRY</h2>
+            <h2 class="text-lg font-bold mb-2 text-slate-400 flex justify-between items-center">
+                <span>CORE TELEMETRY</span>
+                <span id="activeNodeLabel" class="text-xs font-mono px-2 py-1 bg-cyan-900/30 text-cyan-400 rounded border border-cyan-500/30">INC_HW_01</span>
+            </h2>
             <div id="statusBadge" class="text-3xl font-black text-center p-4 rounded bg-green-900/30 text-green-400 border border-green-500/50 mb-4 transition-colors duration-500">
                 SYSTEM SAFE
             </div>
+            <button id="muteBuzzerBtn" onclick="muteBuzzer()" class="w-full mb-4 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-2 px-4 rounded border border-slate-600 transition-colors shadow-lg">
+                🔕 Matikan Sirine (Acknowledge)
+            </button>
             <div class="grid grid-cols-2 gap-3 flex-grow">
                 <div class="bg-slate-900/80 p-3 rounded text-center border border-slate-800 flex flex-col justify-center">
                     <div class="text-xs text-slate-500 font-semibold mb-1">ACCELERATION (X/Y/Z)</div>
@@ -48,27 +50,6 @@
             </div>
         </div>
 
-        <!-- Module E: Geotechnical Prediction -->
-        <div class="module border-cyan-900/50">
-            <h2 class="text-lg font-bold mb-2 text-slate-400">GEOTECHNICAL PREDICTION</h2>
-            <div id="riskBadge" class="text-2xl font-black text-center p-3 rounded bg-slate-800 text-slate-500 mb-3 transition-colors duration-500">
-                WAITING DATA...
-            </div>
-            <div class="grid grid-cols-2 gap-3 flex-grow">
-                <div class="bg-slate-900/80 p-3 rounded text-center border border-slate-800 flex flex-col justify-center">
-                    <div class="text-xs text-slate-500 font-semibold mb-1">INVERSE VELOCITY (1/v)</div>
-                    <div class="text-xl font-mono text-cyan-400" id="invVelDisp">--</div>
-                </div>
-                <div class="bg-slate-900/80 p-3 rounded text-center border border-slate-800 flex flex-col justify-center">
-                    <div class="text-xs text-slate-500 font-semibold mb-1">ANGULAR VEL (&deg;/min)</div>
-                    <div class="text-xl font-mono text-amber-400" id="angVelDisp">--</div>
-                </div>
-                <div class="col-span-2 bg-slate-900/80 p-3 rounded text-center border border-slate-800 flex flex-col justify-center">
-                    <div class="text-xs text-slate-500 font-semibold mb-1">ESTIMATED TIME TO FAILURE</div>
-                    <div class="text-2xl font-mono text-purple-400" id="ttfDisp">--</div>
-                </div>
-            </div>
-        </div>
 
         <!-- Module B: Visual -->
         <div class="module">
@@ -84,24 +65,25 @@
             </div>
         </div>
 
+        <!-- Module D: Map -->
+        <div class="module">
+            <h2 class="text-lg font-bold mb-2 text-slate-400 flex justify-between items-center">
+                <span>TACTICAL MAP</span>
+            </h2>
+            <div id="map" class="flex-grow rounded z-0 border border-slate-700 min-h-[250px]"></div>
+        </div>
+
         <!-- Module C: Chart -->
-        <div class="module col-span-2-module">
+        <div class="module col-span-3-module">
             <h2 class="text-lg font-bold mb-2 text-slate-400">REAL-TIME TREND</h2>
             <div class="flex-grow relative w-full h-full bg-slate-900/50 rounded p-2">
                 <canvas id="telemetryChart"></canvas>
             </div>
         </div>
-
-        <!-- Module D: Map -->
-        <div class="module">
-            <h2 class="text-lg font-bold mb-2 text-slate-400 flex justify-between items-center">
-                <span>TACTICAL MAP</span>
-                <a href="{{ route('incidents') }}" class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1 rounded border border-slate-700 transition-colors">Incident Logs &rarr;</a>
-            </h2>
-            <div id="map" class="flex-grow rounded z-0 border border-slate-700"></div>
-        </div>
     </div>
+@endsection
 
+@push('scripts')
     <script>
         // Map Initialization
         const map = L.map('map', { zoomControl: false }).setView([-8.61, 115.2], 15);
@@ -110,8 +92,98 @@
         }).addTo(map);
         
         let marker = L.marker([-8.61, 115.2], {
-            icon: L.divIcon({ className: 'normal-marker', iconSize: [16, 16], iconAnchor: [8, 8] })
+            icon: L.divIcon({ className: 'normal-marker', iconSize: [16, 16], iconAnchor: [8, 8] }),
+            zIndexOffset: 1000
         }).addTo(map);
+
+        // Load InSAR GeoJSON Data (Simulasi / Ekspor dari QGIS)
+        fetch('/data/insar_data.geojson')
+            .then(res => res.json())
+            .then(data => {
+                L.geoJSON(data, {
+                    pointToLayer: function (feature, latlng) {
+                        let vel = feature.properties.velocity_mm_yr;
+                        let color = '#22c55e'; // Green (Stable)
+                        let radius = 6;
+                        
+                        if (vel <= -50) {
+                            color = '#ef4444'; // Red (Critical Subsidence)
+                            radius = 12;
+                        } else if (vel <= -20) {
+                            color = '#f59e0b'; // Amber (Warning)
+                            radius = 9;
+                        }
+
+                        return L.circleMarker(latlng, {
+                            radius: radius,
+                            fillColor: color,
+                            color: color,
+                            weight: 1,
+                            opacity: 0.8,
+                            fillOpacity: 0.5
+                        }).bindPopup(`<b>InSAR Data</b><br>Velocity: ${vel} mm/yr<br>Coherence: ${feature.properties.coherence}`);
+                    }
+                }).addTo(map);
+            })
+            .catch(err => console.log('InSAR data not found yet.'));
+
+        let currentNodeCode = localStorage.getItem('geoguard_active_node') || 'INC_HW_01';
+
+        // Show which node is active
+        function updateNodeIndicator() {
+            const el = document.getElementById('activeNodeLabel');
+            if (el) el.innerText = currentNodeCode;
+        }
+        updateNodeIndicator();
+
+        function muteBuzzer() {
+            const badgeText = document.getElementById('statusBadge').innerText;
+            if (badgeText.includes('SAFE')) {
+                alert('Sistem saat ini sedang dalam kondisi aman. Tidak ada sirine yang perlu dimatikan.');
+                return;
+            }
+
+            const btn = document.getElementById('muteBuzzerBtn');
+            btn.innerText = "⏳ Mengirim...";
+            btn.disabled = true;
+
+            fetch(`/api/v1/nodes/${currentNodeCode}/mute-buzzer`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                }
+            })
+            .then(res => {
+                if(!res.ok) {
+                    return res.json().then(errData => { throw new Error(errData.message || 'Server Error ' + res.status); });
+                }
+                return res.json();
+            })
+            .then(data => {
+                if(data.status === 'success') {
+                    btn.innerText = "✅ Sirine Dimatikan";
+                    btn.classList.remove('bg-slate-800', 'text-slate-300', 'border-slate-600', 'bg-red-900/50', 'text-red-400', 'border-red-500/50');
+                    btn.classList.add('bg-green-900/50', 'text-green-400', 'border-green-500/50');
+                } else {
+                    throw new Error(data.message || 'Unknown Error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                btn.innerText = "❌ Gagal: " + err.message.substring(0, 30);
+                btn.classList.remove('bg-slate-800', 'text-slate-300', 'border-slate-600');
+                btn.classList.add('bg-red-900/50', 'text-red-400', 'border-red-500/50');
+                
+                // Kembalikan tombol seperti semula setelah 3 detik
+                setTimeout(() => {
+                    btn.innerText = "🔕 Matikan Sirine (Acknowledge)";
+                    btn.classList.add('bg-slate-800', 'text-slate-300', 'border-slate-600');
+                    btn.classList.remove('bg-red-900/50', 'text-red-400', 'border-red-500/50');
+                    btn.disabled = false;
+                }, 3000);
+            });
+        }
 
         // Chart Initialization
         const ctx = document.getElementById('telemetryChart').getContext('2d');
@@ -134,7 +206,7 @@
 
         // Polling Simulation Connection
         function fetchTelemetry() {
-            fetch('/api/v1/telemetry/latest')
+            fetch(`/api/v1/telemetry/latest?node_code=${currentNodeCode}`)
                 .then(res => res.json())
                 .then(data => {
                     if(data.error) return;
@@ -151,11 +223,15 @@
                     document.getElementById('tiltDisp').innerHTML = tiltHtml;
                     
                     document.getElementById('freqDisp').innerText = data.vibration_freq.toFixed(1);
-                    // Update HUD State
+                    if(data.node_code) {
+                        currentNodeCode = data.node_code;
+                    }
+
                     const hud = document.getElementById('hud');
                     const badge = document.getElementById('statusBadge');
+                    const muteBtn = document.getElementById('muteBuzzerBtn');
                     
-                    if (data.status === 'CRITICAL HAZARD' || data.status === 'CRITICAL' || data.status === 'BAHAYA') {
+                    if (data.status === 'CRITICAL HAZARD' || data.status === 'CRITICAL') {
                         hud.classList.add('pulse-border');
                         badge.className = 'text-3xl font-black text-center p-4 rounded bg-red-900/80 text-white mb-4 border-2 border-red-500 pulse-border transition-colors duration-500';
                         badge.innerText = 'CRITICAL HAZARD!';
@@ -174,6 +250,19 @@
                         badge.innerText = 'SYSTEM SAFE';
                         marker.setIcon(L.divIcon({ className: 'normal-marker', iconSize: [16,16], iconAnchor: [8,8] }));
                         document.getElementById('liveIndicator').classList.add('hidden');
+                        
+                        // Reset mute button
+                        muteBtn.disabled = false;
+                        muteBtn.innerText = "🔕 Matikan Sirine (Acknowledge)";
+                        muteBtn.classList.add('bg-slate-800', 'text-slate-300', 'border-slate-600');
+                        muteBtn.classList.remove('bg-green-900/50', 'text-green-400', 'border-green-500/50');
+                    }
+                    
+                    // Update Map Position
+                    if (data.latitude && data.longitude && data.latitude !== 0) {
+                        const newLatLng = [data.latitude, data.longitude];
+                        marker.setLatLng(newLatLng);
+                        map.setView(newLatLng);
                     }
                     
                     // Fetch latest snapshot
@@ -204,43 +293,6 @@
         
         setInterval(fetchTelemetry, 1000);
 
-        function fetchPrediction() {
-            fetch('/api/v1/predictions/latest')
-                .then(res => res.json())
-                .then(data => {
-                    if(data.status === 'no data' || data.error) return;
-                    
-                    document.getElementById('invVelDisp').innerText = data.inv_velocity !== null ? data.inv_velocity.toFixed(4) : '--';
-                    document.getElementById('angVelDisp').innerText = data.angular_velocity !== null ? data.angular_velocity.toFixed(4) : '--';
-                    
-                    const badge = document.getElementById('riskBadge');
-                    if (data.risk_level === 'CRITICAL' || data.risk_level === 'AWAS') {
-                        badge.className = 'text-2xl font-black text-center p-3 rounded bg-red-900/80 text-white mb-3 border-2 border-red-500 pulse-border transition-colors duration-500';
-                        badge.innerText = 'CRITICAL (AWAS)';
-                    } else if (data.risk_level === 'WARNING' || data.risk_level === 'WASPADA') {
-                        badge.className = 'text-2xl font-black text-center p-3 rounded bg-amber-900/30 text-amber-400 border border-amber-500/50 mb-3 transition-colors duration-500';
-                        badge.innerText = 'WARNING (WASPADA)';
-                    } else {
-                        badge.className = 'text-2xl font-black text-center p-3 rounded bg-green-900/30 text-green-400 border border-green-500/50 mb-3 transition-colors duration-500';
-                        badge.innerText = 'STABLE (NORMAL)';
-                    }
-                    
-                    if (data.estimated_collapse_time) {
-                        const ttfDate = new Date(data.estimated_collapse_time);
-                        document.getElementById('ttfDisp').innerText = ttfDate.toLocaleTimeString();
-                        if (data.risk_level === 'CRITICAL' || data.risk_level === 'AWAS') {
-                           document.getElementById('ttfDisp').classList.add('animate-pulse', 'text-red-500');
-                        } else {
-                           document.getElementById('ttfDisp').classList.remove('animate-pulse', 'text-red-500');
-                        }
-                    } else {
-                        document.getElementById('ttfDisp').innerText = '--';
-                    }
-                })
-                .catch(err => console.error("Prediction fetch error", err));
-        }
-        
-        setInterval(fetchPrediction, 2000);
+
     </script>
-</body>
-</html>
+@endpush

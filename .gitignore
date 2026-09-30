@@ -1,1 +1,7 @@
 airflow/logs
+airflow/config/gee_credentials.json
+**/__pycache__/
+*.pyc
+model/*.onnx
+model/*.pt
+.pio/

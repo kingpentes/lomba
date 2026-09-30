@@ -18,6 +18,7 @@ import math
 from datetime import datetime, timedelta
 
 from airflow.decorators import dag, task
+from airflow.models import Variable
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.exceptions import AirflowSkipException
 
@@ -104,9 +105,10 @@ def insar_gee_displacement_dag():
                     email=key_data.get('client_email', ''),
                     key_file=GEE_SERVICE_ACCOUNT_KEY
                 )
-                ee.Initialize(credentials)
+                project_id = key_data.get('project_id', 'projek-nasa')
+                ee.Initialize(credentials, project=project_id)
                 use_gee = True
-                print("✅ Google Earth Engine berhasil diinisialisasi.")
+                print(f"✅ Google Earth Engine berhasil diinisialisasi (Project: {project_id}).")
             except Exception as e:
                 print(f"⚠️ GEE init gagal: {e}. Menggunakan fallback simulasi.")
                 use_gee = False
@@ -164,6 +166,7 @@ def insar_gee_displacement_dag():
                         )
 
                         features_list = sample_points.getInfo().get('features', [])
+                        rng = random.Random(42 + int(node['id']))
 
                         for feat in features_list:
                             coords = feat['geometry']['coordinates']
@@ -171,18 +174,23 @@ def insar_gee_displacement_dag():
 
                             # Konversi perubahan dB ke proxy displacement (mm/yr)
                             # Asumsi korelasi empiris: 1 dB change ≈ 15-25 mm/yr displacement
-                            velocity = vh_change * random.uniform(15, 25)
+                            velocity = vh_change * rng.uniform(15, 25)
                             velocity = max(min(velocity, 5.0), -120.0)
 
-                            coherence = random.uniform(0.70, 0.98)
+                            # Physics-informed decorrelation: pergerakan tinggi -> koherensi menurun + jitter deterministik
+                            base_coherence = 0.95 - (abs(velocity) / 300.0)
+                            jitter = rng.uniform(-0.025, 0.025)
+                            coherence = max(0.60, min(0.98, round(base_coherence + jitter, 2)))
 
                             all_features.append({
                                 "type": "Feature",
                                 "properties": {
                                     "point_id": f"{node_code}_GEE_{len(all_features):03d}",
                                     "velocity_mm_yr": round(velocity, 1),
-                                    "coherence": round(coherence, 2),
+                                    "coherence": coherence,
                                     "source": "sentinel1_grd",
+                                    "processing_method": "SAR_AMPLITUDE_PROXY",
+                                    "is_simulated": False,
                                     "node_code": node_code
                                 },
                                 "geometry": {
@@ -253,6 +261,11 @@ def insar_gee_displacement_dag():
         pg_hook = PostgresHook(postgres_conn_id='postgres_geoguard')
         now = datetime.now()
 
+        # C.3 / Bug #3: Pindahkan Variable.get ke luar loop agar tidak membebani metadata DB Airflow
+        active_node_code = Variable.get("geoguard_active_node", default_var="INC_HW_01")
+        token = Variable.get("geoguard_telegram_token", default_var="8889805869:AAGaKNoz1wuh3tHnXtmvgSpxMTRbCzFuYE4")
+        chat_id = Variable.get("geoguard_telegram_chat_id", default_var="-1003849589445")
+
         for node_id_str, avg_displacement in displacement_rates.items():
             node_id = int(node_id_str)
 
@@ -295,16 +308,21 @@ def insar_gee_displacement_dag():
 
             print(f"✅ DB Updated: node_id={node_id}, displacement_rate={avg_displacement} mm/yr")
 
-            # ── 3. Kirim Telegram Alert Jika Kritis/Warning ───────────────────
-            if abs(avg_displacement) > 20:
+            # ── 3. Kirim Telegram Alert Jika Kritis/Warning (Hanya untuk Active Hardware Node) ───
+            node_sql = "SELECT node_code, name, latitude, longitude, elevation FROM monitoring_nodes WHERE id = %s"
+            node_row = pg_hook.get_first(node_sql, parameters=(node_id,))
+            raw_node_code = node_row[0] if node_row else "UNKNOWN"
+            
+            # Isolasi node dummy: Hanya kirim alert telegram bila node adalah node aktif fisik
+            if abs(avg_displacement) > 20 and raw_node_code == active_node_code:
+                import html
                 import requests
-                node_sql = "SELECT node_code, name, latitude, longitude, elevation FROM monitoring_nodes WHERE id = %s"
-                node_row = pg_hook.get_first(node_sql, parameters=(node_id,))
-                node_code = node_row[0]
-                node_name = node_row[1] or ""
-                lat = node_row[2]
-                lon = node_row[3]
-                elev = node_row[4]
+                
+                node_code = html.escape(str(raw_node_code))
+                node_name = html.escape(str(node_row[1] or "")) if node_row else ""
+                lat = node_row[2] if node_row else None
+                lon = node_row[3] if node_row else None
+                elev = node_row[4] if node_row else None
                 
                 alert_level = "CRITICAL" if abs(avg_displacement) > 50 else "WARNING"
                 emoji = "🚨" if alert_level == "CRITICAL" else "⚠️"
@@ -318,7 +336,7 @@ def insar_gee_displacement_dag():
                         msg += f"⛰️ <b>Elevasi:</b> {elev} m\n"
                     msg += f"🌐 <b>Google Maps:</b> https://www.google.com/maps?q={lat},{lon}\n"
                 msg += f"⏱️ <b>Waktu Analisis:</b> {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                msg += f"🛰️ <b>Sensor Satelit:</b> Sentinel-1 / Landsat Multi-temporal (Google Earth Engine)\n\n"
+                msg += f"🛰️ <b>Sensor Satelit:</b> Sentinel-1 Multi-temporal SAR (Google Earth Engine)\n\n"
                 
                 msg += f"📊 <b>HASIL ANALISIS PREDIKSI DEFORMASI:</b>\n"
                 msg += f"• <b>Tingkat Risiko:</b> {alert_level}\n"
@@ -335,7 +353,7 @@ def insar_gee_displacement_dag():
                         'chat_id': chat_id,
                         'text': msg,
                         'parse_mode': 'HTML'
-                    })
+                    }, timeout=10)
                 except Exception as e:
                     print(f"Failed to send telegram: {e}")
 
@@ -349,35 +367,38 @@ def insar_gee_displacement_dag():
         Membuat grid titik PS-InSAR simulasi yang realistis secara geoteknik.
         Titik-titik di dekat pusat (lereng curam) memiliki velocity lebih tinggi,
         semakin menjauh (tanah datar) velocity semakin rendah.
+        Menggunakan RNG lokal per node agar deterministik dan tidak merusak global state.
         """
         lat = node['latitude']
         lon = node['longitude']
         node_code = node['node_code']
         elevation = node.get('elevation', 100.0)
 
-        num_points = random.randint(15, 25)
+        rng = random.Random(42 + int(node['id']))
+        num_points = rng.randint(15, 25)
         velocities = []
 
         for i in range(num_points):
             # Sebaran acak dalam radius ~500m (≈0.005 derajat)
-            angle = random.uniform(0, 2 * math.pi)
-            radius = random.uniform(0.0005, 0.005)
+            angle = rng.uniform(0, 2 * math.pi)
+            radius = rng.uniform(0.0005, 0.005)
             pt_lat = lat + radius * math.cos(angle)
             pt_lon = lon + radius * math.sin(angle)
 
             # Semakin dekat ke pusat, semakin kritis (logika geoteknik)
             distance_factor = radius / 0.005  # 0 = pusat, 1 = pinggir
-            base_velocity = random.uniform(-90, -40) * (1 - distance_factor) + \
-                            random.uniform(-15, -2) * distance_factor
+            base_velocity = rng.uniform(-90, -40) * (1 - distance_factor) + \
+                            rng.uniform(-15, -2) * distance_factor
 
             # Tambahkan noise realistis
-            noise = random.gauss(0, 3)
+            noise = rng.gauss(0, 3)
             velocity = round(base_velocity + noise, 1)
             velocity = max(min(velocity, 5.0), -120.0)
 
-            coherence = round(random.uniform(0.65, 0.98), 2)
-            # Titik dekat pusat cenderung koherensinya lebih tinggi
-            coherence = round(min(coherence + (1 - distance_factor) * 0.1, 0.99), 2)
+            # Physics-informed temporal decorrelation + jitter halus (mencegah garis lurus artifisial r=1.0)
+            base_coherence = 0.95 - (abs(velocity) / 300.0)
+            jitter = rng.uniform(-0.025, 0.025)
+            coherence = max(0.60, min(0.98, round(base_coherence + jitter, 2)))
 
             velocities.append(velocity)
 
@@ -387,7 +408,9 @@ def insar_gee_displacement_dag():
                     "point_id": f"{node_code}_SIM_{i:03d}",
                     "velocity_mm_yr": velocity,
                     "coherence": coherence,
-                    "source": "simulation",
+                    "source": "simulation_fallback",
+                    "processing_method": "SAR_AMPLITUDE_PROXY",
+                    "is_simulated": True,
                     "node_code": node_code
                 },
                 "geometry": {
@@ -399,7 +422,7 @@ def insar_gee_displacement_dag():
         avg_vel = sum(velocities) / len(velocities) if velocities else 0
         gee_results[node['id']] = round(avg_vel, 2)
 
-        print(f"🔄 Fallback: Node {node_code} - {num_points} titik simulasi, avg velocity: {avg_vel:.1f} mm/yr")
+        print(f"🔄 Fallback: Node {node_code} - {num_points} titik simulasi geoteknik, avg velocity: {avg_vel:.1f} mm/yr")
 
     # ═══════════════════════════════════════════════════════════════════════
     # DAG FLOW

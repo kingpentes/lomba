@@ -10,5 +10,7 @@ Route::get('/user', function (Request $request) {
 
 Route::post('/v1/telemetry', [TelemetryApiController::class, 'ingest']);
 Route::post('/v1/incidents', [TelemetryApiController::class, 'triggerIncident']);
+Route::post('/v1/nodes/{node_code}/mute-buzzer', [TelemetryApiController::class, 'muteBuzzer']);
+Route::post('/v1/nodes/{node_code}/set-interval', [TelemetryApiController::class, 'setInterval']);
 Route::get('/v1/telemetry/latest', [TelemetryApiController::class, 'latest']);
 Route::get('/v1/predictions/latest', [TelemetryApiController::class, 'latestPrediction']);

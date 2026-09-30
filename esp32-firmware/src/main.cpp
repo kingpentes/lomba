@@ -4,8 +4,12 @@
 #include <ArduinoJson.h>
 #include <MPU6050_tockn.h>
 #include <Wire.h>
+#include <TinyGPS++.h>
 #include "time.h"
 #include "config.h"
+
+TinyGPSPlus gps;
+HardwareSerial SerialGPS(2);
 
 MPU6050 mpu(Wire);
 WiFiClient espClient;
@@ -16,6 +20,11 @@ unsigned long telemetryInterval = 2000; // 2 detik
 
 String currentState = "NORMAL";
 bool incidentTriggered = false;
+bool isBuzzerMuted = false;
+
+// Variabel untuk pola beep non-blocking
+unsigned long lastBuzzerToggle = 0;
+bool buzzerState = false;
 
 float lastAccX = 0, lastAccY = 0, lastAccZ = 0;
 
@@ -24,24 +33,19 @@ const long  gmtOffset_sec = 25200; // WIB (GMT+7)
 const int   daylightOffset_sec = 0;
 
 void setFeedback(String state) {
-    // Matikan semua dulu
-    digitalWrite(PIN_LED_GREEN, LOW);
+    // Matikan semua lampu dulu
     digitalWrite(PIN_LED_YELLOW, LOW);
     digitalWrite(PIN_LED_RED, LOW);
-    digitalWrite(PIN_BUZZER, LOW);
 
     if (state == "NORMAL") {
         digitalWrite(PIN_LED_GREEN, HIGH);
+        isBuzzerMuted = false; // Reset mute status when normal
     } else if (state == "WASPADA") {
+        digitalWrite(PIN_LED_GREEN, LOW);
         digitalWrite(PIN_LED_YELLOW, HIGH);
-        // Beep pelan
-        digitalWrite(PIN_BUZZER, HIGH);
-        delay(50);
-        digitalWrite(PIN_BUZZER, LOW);
     } else if (state == "CRITICAL") {
+        digitalWrite(PIN_LED_GREEN, LOW);
         digitalWrite(PIN_LED_RED, HIGH);
-        // Sirine nyala
-        digitalWrite(PIN_BUZZER, HIGH);
     }
 }
 
@@ -52,11 +56,45 @@ void reconnectMQTT() {
         clientId += String(random(0xffff), HEX);
         if (client.connect(clientId.c_str())) {
             Serial.println("Berhasil!");
+            // Subscribe ke topik command
+            client.subscribe("mine/pit1/command");
         } else {
             Serial.print("Gagal, rc=");
             Serial.print(client.state());
             Serial.println(" Coba lagi dalam 5 detik");
             delay(5000);
+        }
+    }
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    String msg;
+    for (unsigned int i = 0; i < length; i++) {
+        msg += (char)payload[i];
+    }
+    Serial.print("Pesan MQTT masuk [");
+    Serial.print(topic);
+    Serial.print("]: ");
+    Serial.println(msg);
+
+    if (String(topic) == "mine/pit1/command") {
+        StaticJsonDocument<256> doc;
+        DeserializationError error = deserializeJson(doc, msg);
+        if (!error) {
+            String cmd = doc["command"];
+            if (cmd == "buzzer_off") {
+                isBuzzerMuted = true;
+                Serial.println("Command diterima: Mematikan Buzzer!");
+                setFeedback(currentState); // Terapkan feedback baru
+            } else if (cmd == "set_interval") {
+                unsigned long newInterval = doc["interval"];
+                if (newInterval > 0) {
+                    telemetryInterval = newInterval;
+                    Serial.print("Command diterima: Mengubah Interval ke ");
+                    Serial.print(telemetryInterval);
+                    Serial.println(" ms");
+                }
+            }
         }
     }
 }
@@ -73,6 +111,9 @@ void setup() {
     pinMode(PIN_BUZZER, OUTPUT);
     
     setFeedback("NORMAL");
+
+    // Inisialisasi GPS (RX=16, TX=17)
+    SerialGPS.begin(9600, SERIAL_8N1, 16, 17);
 
     // Inisialisasi I2C secara spesifik (SDA=21, SCL=22)
     Wire.begin(21, 22);
@@ -92,14 +133,17 @@ void setup() {
     Serial.println("\nWiFi Connected!");
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
+    
+    
 
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     
     client.setServer(MQTT_BROKER_IP, MQTT_PORT);
-    client.setBufferSize(512); // WAJIB DITAMBAHKAN KARENA PAYLOAD JSON KITA CUKUP BESAR
+    client.setCallback(mqttCallback);
+    client.setBufferSize(512); 
 }
 
-void sendTelemetry(float accX, float accY, float accZ, float pitch, float roll, float freq) {
+void sendTelemetry(float accX, float accY, float accZ, float pitch, float roll, float freq, float ppv) {
     if (!client.connected()) {
         reconnectMQTT();
     }
@@ -123,12 +167,21 @@ void sendTelemetry(float accX, float accY, float accZ, float pitch, float roll, 
     doc["pitch"] = pitch;
     doc["roll"] = roll;
     doc["vibration_freq"] = freq;
-    doc["ppv_value"] = 0.5;
+    doc["ppv_value"] = ppv;
     
-    // Status BAHAYA (dipetakan dari CRITICAL)
-    if (currentState == "CRITICAL") doc["ai_classification"] = "BAHAYA";
-    else if (currentState == "WASPADA") doc["ai_classification"] = "WASPADA";
-    else doc["ai_classification"] = "SAFE";
+    // GPS
+    if (gps.location.isValid()) {
+        doc["latitude"] = gps.location.lat();
+        doc["longitude"] = gps.location.lng();
+    } else {
+        doc["latitude"] = 0.0;
+        doc["longitude"] = 0.0;
+    }
+    
+    // Status klasifikasi (konsisten: CRITICAL / WARNING / NORMAL)
+    if (currentState == "CRITICAL") doc["ai_classification"] = "CRITICAL";
+    else if (currentState == "WASPADA") doc["ai_classification"] = "WARNING";
+    else doc["ai_classification"] = "NORMAL";
 
     String requestBody;
     serializeJson(doc, requestBody);
@@ -147,19 +200,27 @@ void loop() {
     }
     client.loop();
 
-    // Mengambil data MPU terbaru (sudah ditangani secara cerdas oleh tockn)
+    // Baca data dari GPS
+    while (SerialGPS.available() > 0) {
+        gps.encode(SerialGPS.read());
+    }
+
     mpu.update();
 
     float accX = mpu.getAccX();
     float accY = mpu.getAccY();
     float accZ = mpu.getAccZ();
     
-    // getAngleX dan getAngleY sudah memberikan nilai absolut dari pitch dan roll yang sudah difilter (Complementary Filter internal)
+    // getAngleX dan getAngleY sudah memberikan nilai absolut dari pitch dan roll yang sudah difilter
     float pitch = mpu.getAngleX();
     float roll = mpu.getAngleY();
 
     float accDiff = abs(accX - lastAccX) + abs(accY - lastAccY) + abs(accZ - lastAccZ);
-    float freq = (accDiff > 0.5) ? accDiff * 2.0 : 0.1;
+    // Estimasi frekuensi getaran dinamis (Hz) berbasis dinamika akselerasi
+    float freq = (accDiff > 0.05) ? round((5.0f + accDiff * 20.0f) * 10.0f) / 10.0f : 0.5f;
+    // Estimasi PPV dinamis (mm/s) berbasis getaran puncak akselerasi
+    float ppv = (accDiff > 0.05) ? round((accDiff * 9.81f * 10.0f / max(freq, 1.0f)) * 100.0f) / 100.0f : 0.15f;
+    ppv = min(max(ppv, 0.1f), 100.0f);
     
     lastAccX = accX;
     lastAccY = accY;
@@ -180,13 +241,34 @@ void loop() {
         setFeedback(currentState);
         
         // Langsung paksa publish saat status berubah agar responsif
-        sendTelemetry(accX, accY, accZ, pitch, roll, freq);
+        sendTelemetry(accX, accY, accZ, pitch, roll, freq, ppv);
         lastTelemetryTime = millis();
     }
 
     if (millis() - lastTelemetryTime >= telemetryInterval) {
         lastTelemetryTime = millis();
-        sendTelemetry(accX, accY, accZ, pitch, roll, freq);
+        sendTelemetry(accX, accY, accZ, pitch, roll, freq, ppv);
+    }
+
+    // --- LOGIKA BUZZER NON-BLOCKING ---
+    if (!isBuzzerMuted) {
+        if (currentState == "CRITICAL") {
+            // Beep Panjang (Nyala terus menerus)
+            digitalWrite(PIN_BUZZER, HIGH);
+        } else if (currentState == "WASPADA") {
+            // Beep Berjeda (500ms ON, 500ms OFF)
+            if (millis() - lastBuzzerToggle >= 500) {
+                lastBuzzerToggle = millis();
+                buzzerState = !buzzerState;
+                digitalWrite(PIN_BUZZER, buzzerState ? HIGH : LOW);
+            }
+        } else {
+            // Normal -> Mati
+            digitalWrite(PIN_BUZZER, LOW);
+        }
+    } else {
+        // Dimatikan manual dari panel
+        digitalWrite(PIN_BUZZER, LOW);
     }
     
     delay(10);

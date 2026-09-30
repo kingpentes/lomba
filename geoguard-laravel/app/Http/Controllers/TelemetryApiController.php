@@ -14,6 +14,15 @@ class TelemetryApiController extends Controller
 {
     public function ingest(Request $request)
     {
+        // Optional API Token check (if GEOGUARD_API_TOKEN configured in .env)
+        $expectedToken = env('GEOGUARD_API_TOKEN');
+        if (!empty($expectedToken)) {
+            $bearer = $request->bearerToken() ?? $request->header('X-API-KEY');
+            if ($bearer !== $expectedToken) {
+                return response()->json(['error' => 'Unauthorized: Invalid API token'], 401);
+            }
+        }
+
         $validated = $request->validate([
             'node_code' => 'required|string',
             'timestamp' => 'required|date',
@@ -35,9 +44,9 @@ class TelemetryApiController extends Controller
             $node = MonitoringNode::create([
                 'node_code' => $validated['node_code'],
                 'name' => 'Auto-generated Node ' . $validated['node_code'],
-                'latitude' => 40.5226,
-                'longitude' => $validated['longitude'] ?? -112.1481,
-                'elevation' => 1500,
+                'latitude' => $validated['latitude'] ?? -1.2370,
+                'longitude' => $validated['longitude'] ?? 116.8520,
+                'elevation' => 85,
                 'status' => 'STABLE'
             ]);
         }
@@ -60,9 +69,22 @@ class TelemetryApiController extends Controller
             $node->update($updateData);
         }
 
-        TelemetryLog::create([
+        // Smart timestamp: gunakan timestamp ESP32 jika valid dan berada di rentang wajar (±24 jam), jika tidak pakai waktu server
+        $recordedAt = now();
+        if (!empty($validated['timestamp'])) {
+            try {
+                $parsedTime = \Carbon\Carbon::parse($validated['timestamp']);
+                if (abs($parsedTime->diffInHours(now())) <= 24) {
+                    $recordedAt = $parsedTime;
+                }
+            } catch (\Exception $e) {
+                $recordedAt = now();
+            }
+        }
+
+        $telemetry = TelemetryLog::create([
             'node_id' => $node->id,
-            'recorded_at' => now(), // Abaikan jam dari ESP32, gunakan waktu asli server/laptop saat data tiba
+            'recorded_at' => $recordedAt,
             'acc_x' => $validated['acc_x'],
             'acc_y' => $validated['acc_y'],
             'acc_z' => $validated['acc_z'],
@@ -134,10 +156,18 @@ class TelemetryApiController extends Controller
         if (!$token || !$chatId)
             return;
 
-        $emoji = $incident->severity === 'CRITICAL' ? '🚨' : '⚠️';
-        $message = "{$emoji} <b>GEOGUARD ALERT: {$incident->severity}</b>\n\n";
-        $message .= "📍 <b>Node:</b> {$node->node_code}" . ($node->name ? " ({$node->name})" : "") . "\n";
+        $emoji     = $incident->severity === 'CRITICAL' ? '🚨' : '⚠️';
+        $safeCode  = htmlspecialchars($node->node_code, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $safeName  = htmlspecialchars($node->name ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $isCrack   = $incident->trigger_type === 'CRACK_DETECT';
+
+        // ── Header ──────────────────────────────────────────────
+        $title = $isCrack ? 'AI CRACK DETECTION ALERT' : 'TILT SENSOR ALERT';
+        $message  = "{$emoji} <b>GEOGUARD {$title}: {$incident->severity}</b>\n\n";
+        $message .= "📍 <b>Node:</b> {$safeCode}" . ($safeName ? " ({$safeName})" : "") . "\n";
         $message .= "⏱ <b>Waktu:</b> " . now()->format('Y-m-d H:i:s') . "\n";
+
+        // ── Koordinat ────────────────────────────────────────────
         if ($node->latitude && $node->longitude) {
             $message .= "🗺️ <b>Koordinat:</b> {$node->latitude}, {$node->longitude}\n";
             if ($node->elevation) {
@@ -145,14 +175,29 @@ class TelemetryApiController extends Controller
             }
             $message .= "🌐 <b>Google Maps:</b> https://www.google.com/maps?q={$node->latitude},{$node->longitude}\n";
         }
-        $message .= "📐 <b>Max Tilt:</b> {$incident->max_tilt_angle}°\n";
-        $message .= "🤖 <b>AI Trigger:</b> {$incident->trigger_type}\n\n";
 
-        if ($incident->severity === 'CRITICAL') {
-            $message .= "‼️ <b>ACTION REQUIRED:</b> IMMEDIATELY EVACUATE THE AREA WITHIN 200m RADIUS.";
+        // ── Detail berdasarkan jenis trigger ─────────────────────
+        $message .= "\n";
+        if ($isCrack) {
+            $confPct  = round($incident->ai_confidence * 100, 1);
+            $message .= "🔍 <b>HASIL DETEKSI AI (YOLO Crack Detection):</b>\n";
+            $message .= "• <b>Jenis Deteksi:</b> Retakan Permukaan (Surface Crack)\n";
+            $message .= "• <b>AI Confidence:</b> {$confPct}%\n";
+            $message .= "• <b>Max Tilt Sensor:</b> {$incident->max_tilt_angle}°\n";
         } else {
-            $message .= "🚧 <b>ACTION REQUIRED:</b> Increase monitoring and restrict heavy equipment.";
+            $message .= "📐 <b>HASIL DETEKSI SENSOR KEMIRINGAN:</b>\n";
+            $message .= "• <b>Max Tilt:</b> {$incident->max_tilt_angle}°\n";
+            $message .= "• <b>Triggered by:</b> Inclinometer (MPU-6050)\n";
         }
+
+        // ── Instruksi tindakan ───────────────────────────────────
+        $message .= "\n";
+        if ($incident->severity === 'CRITICAL') {
+            $message .= "‼️ <b>ACTION REQUIRED:</b> SEGERA EVAKUASI RADIUS 200m! Hentikan seluruh operasi tambang.";
+        } else {
+            $message .= "🚧 <b>ACTION REQUIRED:</b> Tingkatkan monitoring. Batasi operasi alat berat di area ini.";
+        }
+
 
         try {
             if ($incident->snapshot_path) {
@@ -245,8 +290,8 @@ class TelemetryApiController extends Controller
     public function muteBuzzer($node_code)
     {
         try {
-            $server = '100.71.97.101'; // IP Raspberry Pi MQTT Broker
-            $port = 1883;
+            $server = env('MQTT_HOST', '100.71.97.101'); // IP Raspberry Pi MQTT Broker
+            $port = (int) env('MQTT_PORT', 1883);
             $clientId = 'laravel-backend-' . uniqid();
 
             $mqtt = new \PhpMqtt\Client\MqttClient($server, $port, $clientId);
@@ -274,8 +319,8 @@ class TelemetryApiController extends Controller
         ]);
 
         try {
-            $server = '10.214.68.91'; // IP Raspberry Pi MQTT Broker
-            $port = 1883;
+            $server = env('MQTT_HOST', '100.71.97.101'); // IP Raspberry Pi MQTT Broker
+            $port = (int) env('MQTT_PORT', 1883);
             $clientId = 'laravel-backend-' . uniqid();
 
             $mqtt = new \PhpMqtt\Client\MqttClient($server, $port, $clientId);

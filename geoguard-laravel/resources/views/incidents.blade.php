@@ -1,20 +1,12 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GeoGuard - Incident Logs</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = { darkMode: 'class', theme: { extend: { colors: { slate: { 950: '#020617' } } } } }
-    </script>
-</head>
-<body class="bg-slate-950 text-slate-300 font-sans p-8">
-    <div class="max-w-7xl mx-auto">
+@extends('layouts.app')
+
+@section('title', 'Incident Logs')
+
+@section('content')
+    <div class="max-w-7xl mx-auto p-8">
         <div class="flex justify-between items-center mb-8 border-b border-slate-800 pb-4">
             <h1 class="text-3xl font-black text-white">INCIDENT LOGS</h1>
             <div class="space-x-4">
-                <a href="{{ route('dashboard') }}" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded transition">Back to HUD</a>
                 <a href="{{ route('incidents.export') }}" class="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white font-bold rounded transition shadow-[0_0_15px_rgba(6,182,212,0.3)]">Export CSV</a>
             </div>
         </div>
@@ -66,5 +58,4 @@
             </table>
         </div>
     </div>
-</body>
-</html>
+@endsection

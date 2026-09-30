@@ -2,3 +2,4 @@ pandas
 numpy
 apache-airflow-providers-postgres
 psycopg2-binary
+earthengine-api

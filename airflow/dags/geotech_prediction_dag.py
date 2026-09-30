@@ -1,15 +1,17 @@
 import math
+import logging
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 from airflow.decorators import dag, task
+from airflow.models import Variable
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.exceptions import AirflowSkipException
 
 default_args = {
     'owner': 'geoguard',
     'depends_on_past': False,
-    'retries': 1,
+    'retries': 2,
     'retry_delay': timedelta(minutes=1),
 }
 
@@ -27,10 +29,14 @@ def geotech_prediction_dag():
     def extract_telemetry() -> dict:
         pg_hook = PostgresHook(postgres_conn_id='postgres_geoguard')
         
-        # 1. Ambil ID Node
-        node_record = pg_hook.get_first("SELECT id FROM monitoring_nodes WHERE node_code = 'INC_HW_01'")
+        # 1. C.3 FIX: Gunakan Airflow Variable agar dinamis dan tidak hardcoded literal
+        target_node = Variable.get("geoguard_active_node", default_var="INC_HW_01")
+        node_record = pg_hook.get_first(
+            "SELECT id FROM monitoring_nodes WHERE node_code = %s", 
+            parameters=(target_node,)
+        )
         if not node_record:
-            raise AirflowSkipException("Node INC_HW_01 tidak ditemukan.")
+            raise AirflowSkipException(f"Node {target_node} tidak ditemukan.")
         node_id = node_record[0]
         
         # 2. Ambil 30 data terakhir
@@ -45,7 +51,16 @@ def geotech_prediction_dag():
         if len(records) < 5:
             raise AirflowSkipException(f"Data kurang dari 5 baris (hanya {len(records)}). Skip kalkulasi.")
             
-        return {'node_id': node_id, 'records': records}
+        # C.7 FIX: Ambil nilai InSAR terakhir yang valid agar tidak menimpa menjadi 0.0
+        last_insar_row = pg_hook.get_first(
+            """SELECT insar_displacement_rate FROM slope_risk_predictions 
+               WHERE node_id = %s AND insar_displacement_rate IS NOT NULL AND insar_displacement_rate != 0 
+               ORDER BY created_at DESC LIMIT 1""",
+            parameters=(node_id,)
+        )
+        latest_insar = float(last_insar_row[0]) if last_insar_row and last_insar_row[0] is not None else None
+
+        return {'node_id': node_id, 'records': records, 'latest_insar_rate': latest_insar}
 
     @task()
     def calculate_fukuzono(data: dict) -> dict:
@@ -87,12 +102,21 @@ def geotech_prediction_dag():
         df_valid = df.dropna().copy()
         df_valid = df_valid[df_valid['velocity'] > 0.001].copy()
 
+        r_squared = None
         if len(df_valid) >= 5 and risk_level in ['WARNING', 'CRITICAL']:
             df_valid['inv_velocity'] = 1.0 / df_valid['velocity']
             inv_velocity = df_valid['inv_velocity'].iloc[-1]
             
             # Rumus Garis: Y = mX + c (dimana Y = 1/V, X = time_elapsed)
             m, c = np.polyfit(df_valid['time_elapsed_min'], df_valid['inv_velocity'], 1)
+            
+            # Hitung R^2 pada regresi 1/V vs Time (Fukuzono fit)
+            y_actual = df_valid['inv_velocity'].values
+            y_pred = m * df_valid['time_elapsed_min'].values + c
+            ss_res = np.sum((y_actual - y_pred) ** 2)
+            ss_tot = np.sum((y_actual - np.mean(y_actual)) ** 2)
+            if ss_tot > 1e-6:
+                r_squared = max(0.0, min(1.0, float(1.0 - (ss_res / ss_tot))))
             
             # Syarat Fukuzono: Garis 1/V harus menukik turun (slope negatif)
             if m < -0.001:
@@ -109,22 +133,26 @@ def geotech_prediction_dag():
             'inv_velocity': float(inv_velocity),
             'risk_level': risk_level,
             'estimated_collapse_time': estimated_collapse_time.isoformat() if estimated_collapse_time else None,
-            'insar_displacement_rate': 0.0, # Placeholder
-            'latest_record_time': df['recorded_at'].iloc[-1].to_pydatetime()
+            'fukuzono_r2': r_squared,
+            'insar_displacement_rate': data.get('latest_insar_rate'),
+            'latest_record_time': df['recorded_at'].iloc[-1].isoformat()
         }
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # TASK 3: Simpan hasil prediksi ke PostgreSQL (Idempoten)
+    # ═══════════════════════════════════════════════════════════════════════
     @task()
-    def load_prediction(result: dict):
+    def save_prediction_to_db(result: dict) -> dict:
         pg_hook = PostgresHook(postgres_conn_id='postgres_geoguard')
         
-        # 6. Simpan baris baru ke slope_risk_predictions
         insert_sql = """
             INSERT INTO slope_risk_predictions 
             (node_id, angular_velocity, inv_velocity, risk_level, estimated_collapse_time, insar_displacement_rate, created_at, updated_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         """
         now = datetime.now()
-        pg_hook.run(insert_sql, parameters=(
+        record_id = pg_hook.get_first(insert_sql, parameters=(
             result['node_id'],
             result['angular_velocity'],
             result['inv_velocity'],
@@ -133,66 +161,144 @@ def geotech_prediction_dag():
             result['insar_displacement_rate'],
             now,
             now
-        ))
+        ))[0]
         
-        # 7. Status monitoring_nodes dipimpin real-time oleh ESP32
-        
-        # 8. Send Telegram Alert dengan Informasi Lengkap Lokasi & Prediksi
-        # Hanya kirim jika data segar (< 5 menit) dan status WARNING/CRITICAL atau ada TTF keruntuhan
-        latest_time = result.get('latest_record_time')
+        print(f"✅ Prediction saved: id={record_id}, node_id={result['node_id']}, risk={result['risk_level']}, 1/v={result['inv_velocity']:.3f}")
+        result['prediction_id'] = record_id
+        return result
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TASK 4: Kirim Alert Telegram (Terpisah agar retry tidak menduplikasi baris DB)
+    # ═══════════════════════════════════════════════════════════════════════
+    @task()
+    def send_telegram_alert(result: dict):
+        import html
+        import requests
+
+        now = datetime.now()
+        latest_time_str = result.get('latest_record_time')
+        latest_time = datetime.fromisoformat(latest_time_str) if latest_time_str else None
         is_fresh_data = latest_time and (now - latest_time).total_seconds() < 300
 
-        import requests
-        if is_fresh_data and (result['risk_level'] in ['WARNING', 'CRITICAL'] or result['estimated_collapse_time']):
-            token = '8889805869:AAGaKNoz1wuh3tHnXtmvgSpxMTRbCzFuYE4'
-            chat_id = '-1003849589445'
-            
-            node_sql = "SELECT node_code, name, latitude, longitude, elevation FROM monitoring_nodes WHERE id = %s"
-            node_row = pg_hook.get_first(node_sql, parameters=(result['node_id'],))
-            node_code = node_row[0]
-            node_name = node_row[1] or ""
-            lat = node_row[2]
-            lon = node_row[3]
-            elev = node_row[4]
-            
-            emoji = "🚨" if result['risk_level'] == 'CRITICAL' else "⚠️"
-            msg = f"{emoji} <b>AI FUKUZONO PREDICTION ALERT: {result['risk_level']}</b>\n\n"
-            msg += f"📍 <b>Node:</b> {node_code}" + (f" ({node_name})\n" if node_name else "\n")
-            if lat and lon:
-                msg += f"🗺️ <b>Koordinat:</b> {lat}, {lon}\n"
-                if elev:
-                    msg += f"⛰️ <b>Elevasi:</b> {elev} m\n"
-                msg += f"🌐 <b>Google Maps:</b> https://www.google.com/maps?q={lat},{lon}\n"
-            msg += f"⏱️ <b>Waktu:</b> {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            
-            msg += f"📊 <b>HASIL ANALISIS PREDIKSI (FUKUZONO):</b>\n"
-            msg += f"• <b>Status Risiko:</b> {result['risk_level']}\n"
-            msg += f"• <b>Kecepatan Sudut:</b> {result['angular_velocity']:.4f} °/menit\n"
-            msg += f"• <b>Inverse Velocity (1/v):</b> {result['inv_velocity']:.3f}\n"
-            
-            if result['estimated_collapse_time']:
-                ttf_str = result['estimated_collapse_time'].replace('T', ' ')
-                msg += f"\n‼️ <b>PREDIKSI LONGSOR (TTF):</b> {ttf_str}\n"
-                msg += "🚨 <b>TINDAKAN: SEGERA LAKUKAN EVAKUASI RADIUS 200m!</b>"
-            elif result['risk_level'] == 'CRITICAL':
-                msg += "\n🚨 <b>PERHATIAN:</b> Terjadi pergerakan lereng sangat cepat! Segera lakukan evakuasi dan inspeksi lokasi."
-            else:
-                msg += "\n🚧 <b>PERHATIAN:</b> Terdeteksi pergerakan lereng. Tingkatkan kewaspadaan dan pantau telemetri."
-            
+        if not (is_fresh_data and (result['risk_level'] in ['WARNING', 'CRITICAL'] or result.get('estimated_collapse_time'))):
+            print("ℹ️ Tidak ada kondisi darurat (data normal/stale). Alert Telegram di-skip.")
+            return
+
+        token = Variable.get("geoguard_telegram_token", default_var="8889805869:AAGaKNoz1wuh3tHnXtmvgSpxMTRbCzFuYE4")
+        chat_id = Variable.get("geoguard_telegram_chat_id", default_var="-1003849589445")
+        app_url = Variable.get("geoguard_app_url", default_var="https://winatra.indonesiacentral.cloudapp.azure.com").rstrip('/')
+
+        pg_hook = PostgresHook(postgres_conn_id='postgres_geoguard')
+        node_sql = "SELECT node_code, name, latitude, longitude, elevation FROM monitoring_nodes WHERE id = %s"
+        node_row = pg_hook.get_first(node_sql, parameters=(result['node_id'],))
+        
+        node_code = html.escape(str(node_row[0])) if node_row else "UNKNOWN"
+        node_name = html.escape(str(node_row[1] or "")) if node_row else ""
+        lat = node_row[2] if node_row else None
+        lon = node_row[3] if node_row else None
+        elev = node_row[4] if node_row else None
+        
+        # Ambil insiden terbaru untuk foto snapshot dan visual AI crack confidence
+        incident_sql = """
+            SELECT snapshot_path, ai_confidence, trigger_type FROM incidents 
+            WHERE node_id = %s 
+            ORDER BY triggered_at DESC LIMIT 1
+        """
+        inc_row = pg_hook.get_first(incident_sql, parameters=(result['node_id'],))
+        snapshot_path = inc_row[0] if inc_row else None
+        ai_visual_conf = float(inc_row[1]) if inc_row and inc_row[1] is not None else None
+        inc_trigger = inc_row[2] if inc_row else None
+
+        emoji = "🚨" if result['risk_level'] == 'CRITICAL' else "⚠️"
+        msg = f"{emoji} <b>AI FUKUZONO PREDICTION ALERT: {result['risk_level']}</b>\n\n"
+        msg += f"📍 <b>Node:</b> {node_code}" + (f" ({node_name})\n" if node_name else "\n")
+        if lat and lon:
+            msg += f"🗺️ <b>Koordinat:</b> {lat}, {lon}\n"
+            if elev:
+                msg += f"⛰️ <b>Elevasi:</b> {elev} m\n"
+            msg += f"🌐 <b>Google Maps:</b> https://www.google.com/maps?q={lat},{lon}\n"
+        msg += f"⏱️ <b>Waktu:</b> {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        
+        msg += f"📊 <b>HASIL ANALISIS PREDIKSI (FUKUZONO):</b>\n"
+        msg += f"• <b>Status Risiko:</b> {result['risk_level']}\n"
+        msg += f"• <b>Kecepatan Sudut:</b> {result['angular_velocity']:.4f} °/menit\n"
+        msg += f"• <b>Inverse Velocity (1/v):</b> {result['inv_velocity']:.3f}\n"
+
+        # Tampilkan Model Confidence (R^2 Fukuzono Fit)
+        r2_val = result.get('fukuzono_r2')
+        if r2_val is not None:
+            msg += f"• <b>Model Fit (R²):</b> {r2_val * 100:.1f}%\n"
+        else:
+            msg += f"• <b>Model Fit (R²):</b> Estimasi Linear (<5 titik)\n"
+
+        # Tampilkan AI Visual Crack Confidence jika insiden terdeteksi kamera
+        if ai_visual_conf is not None and inc_trigger == 'CRACK_DETECT':
+            msg += f"• <b>AI Visual Crack Confidence:</b> {ai_visual_conf * 100:.1f}%\n"
+        
+        if result.get('estimated_collapse_time'):
             try:
-                requests.post(f"https://api.telegram.org/bot{token}/sendMessage", data={
+                collapse_dt = datetime.fromisoformat(str(result['estimated_collapse_time']).replace('T', ' '))
+                ttf_str     = collapse_dt.strftime('%d %B %Y, %H:%M WIB')
+                delta       = collapse_dt - now
+                total_mins  = int(delta.total_seconds() / 60)
+                if total_mins < 0:
+                    sisa_str = "⚠️ Waktu prediksi telah terlewati — kondisi masih kritis"
+                elif total_mins < 60:
+                    sisa_str = f"± {total_mins} menit lagi"
+                elif total_mins < 1440:
+                    sisa_str = f"± {total_mins // 60} jam {total_mins % 60} menit lagi"
+                else:
+                    sisa_str = f"± {total_mins // 1440} hari {(total_mins % 1440) // 60} jam lagi"
+            except Exception:
+                ttf_str  = str(result['estimated_collapse_time']).replace('T', ' ')
+                sisa_str = "tidak dapat dihitung"
+
+            msg += f"\n🕐 <b>PERKIRAAN WAKTU LONGSOR:</b>\n"
+            msg += f"   📅 <b>{ttf_str}</b>  ({sisa_str})\n\n"
+            msg += "🚨 <b>TINDAKAN DARURAT:</b> SEGERA EVAKUASI RADIUS 200m!\n"
+            msg += "   Hentikan seluruh operasi tambang hingga ada clearance dari tim geoteknik."
+        elif result['risk_level'] == 'CRITICAL':
+            msg += "\n🚨 <b>PERHATIAN:</b> Terjadi pergerakan lereng sangat cepat!\n"
+            msg += "   Segera lakukan evakuasi dan inspeksi lokasi. Harap berhati-hati untuk sementara waktu."
+        else:
+            msg += "\n🚧 <b>PERHATIAN:</b> Terdeteksi pergerakan lereng tahap awal.\n"
+            msg += "   Tingkatkan kewaspadaan dan pantau telemetri secara berkala. Harap berhati-hati untuk sementara waktu."
+
+        sent_photo = False
+        if snapshot_path:
+            try:
+                photo_url = f"{app_url}/storage/{snapshot_path}"
+                res = requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", data={
+                    'chat_id': chat_id,
+                    'photo': photo_url,
+                    'caption': msg,
+                    'parse_mode': 'HTML'
+                }, timeout=10)
+                if res.status_code == 200:
+                    sent_photo = True
+                else:
+                    logging.warning(f"Telegram sendPhoto failed ({res.status_code}): {res.text}")
+            except Exception as pe:
+                logging.warning(f"Error sending photo alert: {pe}")
+
+        if not sent_photo:
+            try:
+                res = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", data={
                     'chat_id': chat_id,
                     'text': msg,
                     'parse_mode': 'HTML'
-                })
+                }, timeout=10)
+                res.raise_for_status()
             except Exception as e:
-                print(f"Failed to send telegram: {e}")
+                logging.error(f"Failed to send telegram alert: {e}")
+                raise
 
-        print(f"Prediction saved for node {result['node_id']} | Status: {result['risk_level']} | 1/v: {result['inv_velocity']}")
-
-    # DAG Dependency Flow
+    # ═══════════════════════════════════════════════════════════════════════
+    # DAG FLOW: Extract -> Calculate -> Save DB -> Send Alert
+    # ═══════════════════════════════════════════════════════════════════════
     data = extract_telemetry()
     prediction = calculate_fukuzono(data)
-    load_prediction(prediction)
+    saved_prediction = save_prediction_to_db(prediction)
+    send_telegram_alert(saved_prediction)
 
 dag = geotech_prediction_dag()

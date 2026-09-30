@@ -15,4 +15,20 @@ class DashboardController extends Controller
         
         return view('dashboard', compact('nodes', 'latestIncident'));
     }
+
+    public function dispatcher()
+    {
+        $nodes = MonitoringNode::with(['latestTelemetry', 'latestIncident'])->get();
+        return view('dispatcher', compact('nodes'));
+    }
+
+    public function prediction()
+    {
+        return view('prediction');
+    }
+
+    public function earlyWarning()
+    {
+        return view('earlywarning');
+    }
 }

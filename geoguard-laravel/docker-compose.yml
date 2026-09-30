@@ -1,0 +1,54 @@
+version: '3.8'
+
+networks:
+  geoguard_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kyushuu27/geoguard-app
+    container_name: geoguard-app
+    restart: always
+    networks:
+      - geoguard_net
+    ports:
+      - "8000:80"
+    env_file:
+      - .env
+    environment:
+      - DB_CONNECTION=pgsql
+      - DB_HOST=172.25.0.3
+      - DB_PORT=5432
+    depends_on:
+      - db
+    volumes:
+      - ./storage:/var/www/html/storage
+      - ./public/snapshots:/var/www/html/public/snapshots
+      - airflow_geojson_shared:/var/www/html/public/data
+
+  db:
+    image: postgres:15-alpine
+    container_name: geoguard-db
+    restart: always
+    networks:
+      geoguard_net:
+        ipv4_address: 172.25.0.3
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_DB=${DB_DATABASE:-geoguard}
+      - POSTGRES_USER=${DB_USERNAME:-geoguard}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-password}
+    volumes:
+      - geoguard_pgdata:/var/lib/postgresql/data
+
+volumes:
+  geoguard_pgdata:
+  airflow_geojson_shared:
+    external: true

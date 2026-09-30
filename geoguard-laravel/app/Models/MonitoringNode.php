@@ -24,6 +24,16 @@ class MonitoringNode extends Model
         return $this->hasMany(Incident::class, 'node_id');
     }
 
+    public function latestTelemetry()
+    {
+        return $this->hasOne(TelemetryLog::class, 'node_id')->latestOfMany();
+    }
+
+    public function latestIncident()
+    {
+        return $this->hasOne(Incident::class, 'node_id')->latestOfMany('triggered_at');
+    }
+
     public function slopeRiskPredictions()
     {
         return $this->hasMany(SlopeRiskPrediction::class, 'node_id');

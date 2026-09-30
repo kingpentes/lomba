@@ -9,7 +9,7 @@
 // ==========================================
 // MQTT SETTINGS (Raspberry Pi Gateway)
 // ==========================================
-#define MQTT_BROKER_IP "10.191.154.91"
+#define MQTT_BROKER_IP "10.94.19.91"
 #define MQTT_PORT 1883
 #define MQTT_TOPIC "mine/pit1/inclinometer"
 

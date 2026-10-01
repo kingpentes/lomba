@@ -36,6 +36,7 @@ class TelemetryApiController extends Controller
             'ai_classification' => 'required|string',
             'latitude' => 'nullable|numeric',
             'longitude' => 'nullable|numeric',
+            'elevation' => 'nullable|numeric',
         ]);
 
         $node = MonitoringNode::where('node_code', $validated['node_code'])->first();
@@ -56,6 +57,11 @@ class TelemetryApiController extends Controller
         if (isset($validated['latitude']) && isset($validated['longitude']) && $validated['latitude'] != 0.0) {
             $updateData['latitude'] = $validated['latitude'];
             $updateData['longitude'] = $validated['longitude'];
+        }
+        
+        // Terima nilai elevasi (altitude) dari GPS jika dikirimkan oleh ESP32
+        if (isset($validated['elevation'])) {
+            $updateData['elevation'] = $validated['elevation'];
         }
         
         $espStatus = strtoupper($validated['ai_classification']);
@@ -123,11 +129,8 @@ class TelemetryApiController extends Controller
             $maxTilt = max(abs($validated['angle_x']), abs($validated['angle_y']));
             $severity = $validated['status'];  // Sudah langsung CRITICAL atau WARNING
 
-            // Gunakan confidence dari AI jika tersedia, fallback ke 0.99
-            $aiConfidence = $validated['ai_confidence'] ?? 0.99;
-
-            // Trigger type: CRACK_DETECT jika AI mendeteksi retakan, TILT_ALERT jika hanya sensor
-            $triggerType = ($aiConfidence > 0 && $aiConfidence < 0.99) ? 'CRACK_DETECT' : 'TILT_ALERT';
+            $aiConfidence = $request->input('ai_confidence', null);
+            $triggerType = $request->input('trigger_type', 'TILT_ALERT');
 
             $incident = Incident::create([
                 'node_id' => $node->id,
@@ -140,7 +143,10 @@ class TelemetryApiController extends Controller
                 'status' => 'UNRESOLVED',
             ]);
 
-            $node->update(['status' => $severity]);
+            // Update status HANYA jika ini dari sensor fisik (bukan dari kamera)
+            if ($triggerType !== 'CRACK_DETECT') {
+                $node->update(['status' => $severity]);
+            }
 
             // Send Telegram Notification
             $this->sendTelegramAlert($incident, $node);
@@ -165,7 +171,7 @@ class TelemetryApiController extends Controller
         $title = $isCrack ? 'AI CRACK DETECTION ALERT' : 'TILT SENSOR ALERT';
         $message  = "{$emoji} <b>GEOGUARD {$title}: {$incident->severity}</b>\n\n";
         $message .= "📍 <b>Node:</b> {$safeCode}" . ($safeName ? " ({$safeName})" : "") . "\n";
-        $message .= "⏱ <b>Waktu:</b> " . now()->format('Y-m-d H:i:s') . "\n";
+        $message .= "⏱ <b>Waktu:</b> " . now()->timezone('Asia/Makassar')->format('Y-m-d H:i:s') . " WITA\n";
 
         // ── Koordinat ────────────────────────────────────────────
         if ($node->latitude && $node->longitude) {
@@ -284,6 +290,8 @@ class TelemetryApiController extends Controller
             'estimated_collapse_time' => $prediction->estimated_collapse_time,
             'insar_rate' => (float) $prediction->insar_displacement_rate,
             'calculated_at' => $prediction->created_at->toIso8601String(),
+            'latitude' => $prediction->node ? (float) $prediction->node->latitude : -1.215,
+            'longitude' => $prediction->node ? (float) $prediction->node->longitude : 116.851,
         ]);
     }
 
@@ -299,7 +307,8 @@ class TelemetryApiController extends Controller
 
             $payload = json_encode([
                 'command' => 'buzzer_off',
-                'node' => $node_code
+                'node' => $node_code,
+                'targetNode' => $node_code
             ]);
 
             $mqtt->publish('mine/pit1/command', $payload, 0);
@@ -329,6 +338,7 @@ class TelemetryApiController extends Controller
             $payload = json_encode([
                 'command' => 'set_interval',
                 'node' => $node_code,
+                'targetNode' => $node_code,
                 'interval' => $validated['interval']
             ]);
 
@@ -340,5 +350,67 @@ class TelemetryApiController extends Controller
             \Illuminate\Support\Facades\Log::error('MQTT Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'MQTT failed: ' . $e->getMessage()], 500);
         }
+    }
+    public function setLocation(Request $request, $node_code)
+    {
+        $validated = $request->validate([
+            'latitude' => 'required|numeric',
+            'longitude' => 'required|numeric',
+            'elevation' => 'nullable|numeric'
+        ]);
+
+        $node = MonitoringNode::where('node_code', $node_code)->first();
+        
+        if (!$node) {
+            return response()->json(['status' => 'error', 'message' => 'Node not found'], 404);
+        }
+
+        $node->update([
+            'latitude' => $validated['latitude'],
+            'longitude' => $validated['longitude'],
+            'elevation' => $validated['elevation'] ?? $node->elevation
+        ]);
+
+        return response()->json([
+            'status' => 'success', 
+            'message' => 'Manual location updated successfully',
+            'data' => [
+                'latitude' => $node->latitude,
+                'longitude' => $node->longitude,
+                'elevation' => $node->elevation
+            ]
+        ]);
+    }
+
+    public function getInsarMode()
+    {
+        $path = public_path('data/insar_mode.json');
+        $mode = 'real';
+        if (file_exists($path)) {
+            $data = json_decode(file_get_contents($path), true);
+            if (isset($data['mode'])) {
+                $mode = $data['mode'];
+            }
+        }
+        return response()->json(['mode' => $mode]);
+    }
+
+    public function setInsarMode(Request $request)
+    {
+        $request->validate(['mode' => 'required|in:real,simulated']);
+        
+        $path = public_path('data/insar_mode.json');
+        
+        // Pastikan folder data ada
+        if (!file_exists(public_path('data'))) {
+            mkdir(public_path('data'), 0755, true);
+        }
+
+        file_put_contents($path, json_encode(['mode' => $request->mode]));
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'InSAR mode updated successfully to ' . $request->mode
+        ]);
     }
 }

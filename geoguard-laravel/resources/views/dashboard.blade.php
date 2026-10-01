@@ -16,7 +16,7 @@
         
         .pulse-marker { width: 24px; height: 24px; background: rgba(239, 68, 68, 0.8); border-radius: 50%; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); animation: mapPulse 1.5s infinite; }
         .normal-marker { width: 16px; height: 16px; background: rgba(34, 197, 94, 0.8); border-radius: 50%; border: 2px solid white; }
-        @keyframes mapPulse { 0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { transform: scale(1); box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); } 100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
+        @keyframes mapPulse { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
     </style>
 @endpush
 
@@ -69,6 +69,14 @@
         <div class="module">
             <h2 class="text-lg font-bold mb-2 text-slate-400 flex justify-between items-center">
                 <span>TACTICAL MAP</span>
+                <div class="flex items-center">
+                    <label class="inline-flex items-center cursor-pointer mr-3" title="Toggle InSAR Simulation Mode">
+                        <input type="checkbox" id="simToggle" onchange="toggleSimMode(this)" class="sr-only peer">
+                        <div class="relative w-7 h-4 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-cyan-500"></div>
+                        <span class="ms-2 text-[10px] font-bold text-slate-400">SIM</span>
+                    </label>
+                    <button id="setLocBtn" onclick="promptSetLocation()" class="text-[10px] bg-slate-800 hover:bg-cyan-900 text-cyan-400 px-2 py-1 rounded border border-cyan-800 transition-colors">SET LOC</button>
+                </div>
             </h2>
             <div id="map" class="flex-grow rounded z-0 border border-slate-700 min-h-[250px]"></div>
         </div>
@@ -86,12 +94,12 @@
 @push('scripts')
     <script>
         // Map Initialization
-        const map = L.map('map', { zoomControl: false }).setView([-8.61, 115.2], 15);
+        const map = L.map('map', { zoomControl: false }).setView([-1.215, 116.851], 14);
         L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
             attribution: 'Tiles &copy; Esri'
         }).addTo(map);
         
-        let marker = L.marker([-8.61, 115.2], {
+        let marker = L.marker([-1.215, 116.851], {
             icon: L.divIcon({ className: 'normal-marker', iconSize: [16, 16], iconAnchor: [8, 8] }),
             zIndexOffset: 1000
         }).addTo(map);
@@ -114,14 +122,24 @@
                             radius = 9;
                         }
 
-                        return L.circleMarker(latlng, {
+                        let circle = L.circleMarker(latlng, {
                             radius: radius,
                             fillColor: color,
                             color: color,
                             weight: 1,
                             opacity: 0.8,
                             fillOpacity: 0.5
-                        }).bindPopup(`<b>InSAR Data</b><br>Velocity: ${vel} mm/yr<br>Coherence: ${feature.properties.coherence}`);
+                        });
+                        
+                        circle.on('click', function(e) {
+                            if (window.isSettingLocation) {
+                                map.fireEvent('click', e);
+                            } else {
+                                circle.bindPopup(`<b>InSAR Data</b><br>Velocity: ${vel} mm/yr<br>Coherence: ${feature.properties.coherence}`).openPopup();
+                            }
+                        });
+                        
+                        return circle;
                     }
                 }).addTo(map);
             })
@@ -196,7 +214,13 @@
             ]},
             options: {
                 responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
-                plugins: { legend: { display: false } },
+                plugins: { 
+                    legend: { 
+                        display: true, 
+                        position: 'top', 
+                        labels: { color: '#94a3b8', boxWidth: 12, usePointStyle: true, pointStyle: 'circle' } 
+                    } 
+                },
                 scales: {
                     x: { display: false },
                     y: { grid: { color: '#334155' }, border: { dash: [4,4] }, ticks: { color: '#94a3b8', font: { family: 'monospace' } } }
@@ -205,13 +229,26 @@
         });
 
         // Polling Simulation Connection
+        let isMapCentered = false;
         function fetchTelemetry() {
-            fetch(`/api/v1/telemetry/latest?node_code=${currentNodeCode}`)
-                .then(res => res.json())
-                .then(data => {
-                    if(data.error) return;
-                    
-                    // Update Text
+            Promise.all([
+                fetch(`/api/v1/telemetry/latest?node_code=${currentNodeCode}`).then(res => res.json()),
+                fetch('/api/v1/predictions/latest').then(res => res.json()).catch(() => ({}))
+            ]).then(([data, predData]) => {
+                if(data.error) return;
+                
+                // Evaluate combined risk level
+                let worstStatus = data.status || 'NORMAL';
+                if (predData && predData.risk_level) {
+                    const teleRisk = worstStatus.toUpperCase();
+                    const predRisk = predData.risk_level.toUpperCase();
+                    const riskOrder = { NORMAL: 0, STABLE: 0, WARNING: 1, WASPADA: 1, 'OPERATIONAL NOISE': 1, CRITICAL: 2, 'CRITICAL HAZARD': 2 };
+                    if ((riskOrder[predRisk] || 0) > (riskOrder[teleRisk] || 0)) {
+                        worstStatus = predRisk;
+                    }
+                }
+                
+                // Update Text
                     document.getElementById('accelDisp').innerText = `${data.acc_x.toFixed(2)} / ${data.acc_y.toFixed(2)} / ${data.acc_z.toFixed(2)}`;
                     const pText = data.pitch.toFixed(1);
                     const rText = data.roll.toFixed(1);
@@ -231,14 +268,14 @@
                     const badge = document.getElementById('statusBadge');
                     const muteBtn = document.getElementById('muteBuzzerBtn');
                     
-                    if (data.status === 'CRITICAL HAZARD' || data.status === 'CRITICAL') {
+                    if (worstStatus === 'CRITICAL HAZARD' || worstStatus === 'CRITICAL') {
                         hud.classList.add('pulse-border');
                         badge.className = 'text-3xl font-black text-center p-4 rounded bg-red-900/80 text-white mb-4 border-2 border-red-500 pulse-border transition-colors duration-500';
                         badge.innerText = 'CRITICAL HAZARD!';
                         marker.setIcon(L.divIcon({ className: 'pulse-marker', iconSize: [24,24], iconAnchor: [12,12] }));
                         document.getElementById('liveIndicator').classList.remove('hidden');
 
-                    } else if (data.status === 'OPERATIONAL NOISE' || data.status === 'WARNING' || data.status === 'WASPADA') {
+                    } else if (worstStatus === 'OPERATIONAL NOISE' || worstStatus === 'WARNING' || worstStatus === 'WASPADA') {
                         hud.classList.remove('pulse-border');
                         badge.className = 'text-3xl font-black text-center p-4 rounded bg-amber-900/30 text-amber-400 border border-amber-500/50 mb-4 transition-colors duration-500';
                         badge.innerText = 'SYSTEM WARNING';
@@ -262,7 +299,10 @@
                     if (data.latitude && data.longitude && data.latitude !== 0) {
                         const newLatLng = [data.latitude, data.longitude];
                         marker.setLatLng(newLatLng);
-                        map.setView(newLatLng);
+                        if (!isMapCentered) {
+                            map.setView(newLatLng);
+                            isMapCentered = true;
+                        }
                     }
                     
                     // Fetch latest snapshot
@@ -292,6 +332,75 @@
         }
         
         setInterval(fetchTelemetry, 1000);
+
+        let isSettingLocation = false;
+
+        function promptSetLocation() {
+            const setLocBtn = document.getElementById('setLocBtn');
+            isSettingLocation = !isSettingLocation;
+            if (isSettingLocation) {
+                setLocBtn.innerText = "CLICK ON MAP";
+                setLocBtn.classList.replace('bg-slate-800', 'bg-amber-600');
+                setLocBtn.classList.replace('text-cyan-400', 'text-white');
+                document.getElementById('map').style.cursor = 'crosshair';
+            } else {
+                setLocBtn.innerText = "SET LOC";
+                setLocBtn.classList.replace('bg-amber-600', 'bg-slate-800');
+                setLocBtn.classList.replace('text-white', 'text-cyan-400');
+                document.getElementById('map').style.cursor = '';
+            }
+        }
+
+        map.on('click', function(e) {
+            if (!isSettingLocation) return;
+            
+            if(confirm(`Pindahkan tiang ke kordinat ini?\nLat: ${e.latlng.lat.toFixed(5)}\nLng: ${e.latlng.lng.toFixed(5)}`)) {
+                fetch(`/api/v1/nodes/${currentNodeCode}/set-location`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ latitude: e.latlng.lat, longitude: e.latlng.lng })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if(data.status === 'success') {
+                        // Immediately update local marker
+                        marker.setLatLng(e.latlng);
+                        alert('Lokasi berhasil diupdate!');
+                    } else {
+                        alert('Gagal: ' + data.message);
+                    }
+                }).catch(err => alert('Koneksi Error'));
+            }
+            
+            // Auto turn off edit mode
+            promptSetLocation();
+        });
+
+        // Initialize Simulation Toggle
+        fetch('/api/v1/insar/mode')
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('simToggle').checked = (data.mode === 'simulated');
+            }).catch(err => console.log('Could not fetch sim mode.'));
+
+        function toggleSimMode(el) {
+            const mode = el.checked ? 'simulated' : 'real';
+            fetch('/api/v1/insar/mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                body: JSON.stringify({ mode: mode })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('InSAR mode set to ' + mode.toUpperCase() + '.\\nChange will take effect on the next Airflow DAG run.');
+                }
+            })
+            .catch(err => {
+                alert('Gagal mengubah mode InSAR.');
+                el.checked = !el.checked;
+            });
+        }
 
 
     </script>

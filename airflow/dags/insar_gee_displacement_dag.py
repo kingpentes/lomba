@@ -37,7 +37,7 @@ GEE_SERVICE_ACCOUNT_KEY = os.environ.get(
 default_args = {
     'owner': 'geoguard',
     'depends_on_past': False,
-    'retries': 1,
+    'retries': 0,
     'retry_delay': timedelta(minutes=2),
 }
 
@@ -95,7 +95,22 @@ def insar_gee_displacement_dag():
         gee_results = {}
 
         # ── Coba inisialisasi GEE ────────────────────────────────────────
-        if os.path.exists(GEE_SERVICE_ACCOUNT_KEY):
+        force_sim = False
+        try:
+            mode_file = os.path.join(os.path.dirname(GEOJSON_OUTPUT_PATH), 'insar_mode.json')
+            if os.path.exists(mode_file):
+                with open(mode_file, 'r') as f:
+                    mode_data = json.load(f)
+                    if mode_data.get('mode') == 'simulated':
+                        force_sim = True
+                        print("ℹ️ Mode Simulasi diaktifkan secara manual melalui konfigurasi/UI.")
+        except Exception as e:
+            print(f"⚠️ Gagal membaca insar_mode.json: {e}")
+
+        if force_sim:
+            use_gee = False
+            print("ℹ️ Mode Simulasi aktif. Menggunakan generator data simulasi.")
+        elif os.path.exists(GEE_SERVICE_ACCOUNT_KEY):
             try:
                 import ee
                 with open(GEE_SERVICE_ACCOUNT_KEY, 'r') as f:
@@ -110,10 +125,9 @@ def insar_gee_displacement_dag():
                 use_gee = True
                 print(f"✅ Google Earth Engine berhasil diinisialisasi (Project: {project_id}).")
             except Exception as e:
-                print(f"⚠️ GEE init gagal: {e}. Menggunakan fallback simulasi.")
-                use_gee = False
+                raise Exception(f"GEE init gagal: {e}. Fallback otomatis dinonaktifkan. Harap nyalakan mode SIM jika ingin simulasi.")
         else:
-            print(f"⚠️ GEE credential tidak ditemukan di {GEE_SERVICE_ACCOUNT_KEY}. Menggunakan fallback simulasi.")
+            raise Exception(f"GEE credential tidak ditemukan di {GEE_SERVICE_ACCOUNT_KEY}. Harap nyalakan mode SIM jika ingin simulasi.")
 
         all_features = []
 
@@ -130,10 +144,10 @@ def insar_gee_displacement_dag():
                     point = ee.Geometry.Point([lon, lat])
                     aoi = point.buffer(500)  # Buffer 500m di sekitar lereng
 
-                    # Rentang waktu: 2 periode (sekarang vs 12 hari lalu)
+                    # Rentang waktu diperlebar: 60 hari terakhir 
                     end_date = datetime.utcnow()
-                    mid_date = end_date - timedelta(days=12)
-                    start_date = end_date - timedelta(days=24)
+                    mid_date = end_date - timedelta(days=30)
+                    start_date = end_date - timedelta(days=60)
 
                     def get_sentinel1_mean(start, end):
                         """Ambil rata-rata backscatter VH dari Sentinel-1 GRD."""
@@ -204,12 +218,10 @@ def insar_gee_displacement_dag():
 
                         print(f"✅ GEE: Node {node_code} - {len(features_list)} titik dianalisis, avg velocity: {avg_vel:.1f} mm/yr")
                     else:
-                        print(f"⚠️ GEE: Tidak ada citra Sentinel-1 untuk node {node_code}. Fallback ke simulasi.")
-                        _generate_fallback_points(node, all_features, gee_results)
+                        raise Exception(f"GEE: Tidak ada citra Sentinel-1 untuk node {node_code}. Fallback otomatis dinonaktifkan.")
 
                 except Exception as e:
-                    print(f"⚠️ GEE error untuk node {node_code}: {e}. Fallback ke simulasi.")
-                    _generate_fallback_points(node, all_features, gee_results)
+                    raise Exception(f"GEE error untuk node {node_code}: {e}. Fallback otomatis dinonaktifkan.")
             else:
                 # ── MODE FALLBACK SIMULASI ────────────────────────────────
                 _generate_fallback_points(node, all_features, gee_results)
@@ -335,7 +347,7 @@ def insar_gee_displacement_dag():
                     if elev:
                         msg += f"⛰️ <b>Elevasi:</b> {elev} m\n"
                     msg += f"🌐 <b>Google Maps:</b> https://www.google.com/maps?q={lat},{lon}\n"
-                msg += f"⏱️ <b>Waktu Analisis:</b> {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                msg += f"⏱️ <b>Waktu Analisis:</b> {(now + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')} WITA\n"
                 msg += f"🛰️ <b>Sensor Satelit:</b> Sentinel-1 Multi-temporal SAR (Google Earth Engine)\n\n"
                 
                 msg += f"📊 <b>HASIL ANALISIS PREDIKSI DEFORMASI:</b>\n"

@@ -48,13 +48,8 @@
     <!-- ═══════════════════════════════════════════════════════════════════ -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <!-- Dynamic Node Cards will be injected here -->
-        <div id="nodeCardsContainer">
-            <!-- Placeholder while loading -->
-            <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 animate-pulse">
-                <div class="h-4 bg-slate-800 rounded w-1/3 mb-4"></div>
-                <div class="h-8 bg-slate-800 rounded w-1/2 mb-2"></div>
-                <div class="h-4 bg-slate-800 rounded w-full"></div>
-            </div>
+        <div id="nodeCardsContainer" class="flex flex-col gap-4">
+            <!-- Dynamic Node Cards will be injected here by JS -->
         </div>
     </div>
 

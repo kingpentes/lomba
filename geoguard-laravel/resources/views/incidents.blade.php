@@ -7,7 +7,7 @@
         <div class="flex justify-between items-center mb-8 border-b border-slate-800 pb-4">
             <h1 class="text-3xl font-black text-white">INCIDENT LOGS</h1>
             <div class="space-x-4">
-                <a href="{{ route('incidents.export') }}" class="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white font-bold rounded transition shadow-[0_0_15px_rgba(6,182,212,0.3)]">Export CSV</a>
+                <a href="/incidents/export" class="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white font-bold rounded transition shadow-[0_0_15px_rgba(6,182,212,0.3)]">Export CSV</a>
             </div>
         </div>
 
@@ -46,7 +46,16 @@
                                 @endif
                             </td>
                             <td class="p-4">
-                                <span class="text-slate-400 text-sm">{{ $incident->status }}</span>
+                                <form action="/incidents/{{ $incident->id }}/status" method="POST" class="inline">
+                                    @csrf
+                                    @method('PATCH')
+                                    <select name="status" onchange="this.form.submit()" class="bg-slate-800 text-xs font-bold px-2 py-1 rounded border border-slate-700 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors cursor-pointer 
+                                        {{ $incident->status === 'UNRESOLVED' ? 'text-red-400' : ($incident->status === 'ACKNOWLEDGED' ? 'text-amber-400' : 'text-green-400') }}">
+                                        <option value="UNRESOLVED" {{ $incident->status === 'UNRESOLVED' ? 'selected' : '' }} class="text-red-400">UNRESOLVED</option>
+                                        <option value="ACKNOWLEDGED" {{ $incident->status === 'ACKNOWLEDGED' ? 'selected' : '' }} class="text-amber-400">ACKNOWLEDGED</option>
+                                        <option value="RESOLVED" {{ $incident->status === 'RESOLVED' ? 'selected' : '' }} class="text-green-400">RESOLVED</option>
+                                    </select>
+                                </form>
                             </td>
                         </tr>
                     @empty

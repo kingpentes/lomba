@@ -42,4 +42,17 @@ class IncidentController extends Controller
         $response->headers->set('Content-Disposition', 'attachment; filename="incident_report.csv"');
         return $response;
     }
+
+    public function updateStatus(Request $request, $id)
+    {
+        $request->validate([
+            'status' => 'required|in:UNRESOLVED,ACKNOWLEDGED,RESOLVED'
+        ]);
+
+        $incident = Incident::findOrFail($id);
+        $incident->status = $request->status;
+        $incident->save();
+
+        return redirect()->back()->with('success', 'Incident status updated successfully.');
+    }
 }

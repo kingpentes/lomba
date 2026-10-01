@@ -32,6 +32,13 @@ const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 25200; // WIB (GMT+7)
 const int   daylightOffset_sec = 0;
 
+void sendDebugLog(String message) {
+    Serial.println(message); 
+    if (client.connected()) {
+        client.publish("mine/pit1/debug", message.c_str());
+    }
+}
+
 void setFeedback(String state) {
     // Matikan semua lampu dulu
     digitalWrite(PIN_LED_YELLOW, LOW);
@@ -81,18 +88,19 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         StaticJsonDocument<256> doc;
         DeserializationError error = deserializeJson(doc, msg);
         if (!error) {
-            String cmd = doc["command"];
-            if (cmd == "buzzer_off") {
-                isBuzzerMuted = true;
-                Serial.println("Command diterima: Mematikan Buzzer!");
-                setFeedback(currentState); // Terapkan feedback baru
-            } else if (cmd == "set_interval") {
-                unsigned long newInterval = doc["interval"];
-                if (newInterval > 0) {
-                    telemetryInterval = newInterval;
-                    Serial.print("Command diterima: Mengubah Interval ke ");
-                    Serial.print(telemetryInterval);
-                    Serial.println(" ms");
+            String targetNode = doc["node"] | "";
+            if (targetNode == NODE_CODE || targetNode == "ALL") {
+                String cmd = doc["command"];
+                if (cmd == "buzzer_off") {
+                    isBuzzerMuted = true;
+                    sendDebugLog("[CMD] Mematikan Buzzer karena perintah dashboard.");
+                    setFeedback(currentState); // Terapkan feedback baru
+                } else if (cmd == "set_interval") {
+                    unsigned long newInterval = doc["interval"];
+                    if (newInterval > 0) {
+                        telemetryInterval = newInterval;
+                        sendDebugLog("[CMD] Mengubah Interval Telemetri ke: " + String(telemetryInterval) + " ms");
+                    }
                 }
             }
         }
@@ -173,6 +181,7 @@ void sendTelemetry(float accX, float accY, float accZ, float pitch, float roll, 
     if (gps.location.isValid()) {
         doc["latitude"] = gps.location.lat();
         doc["longitude"] = gps.location.lng();
+        doc["elevation"] = gps.altitude.meters();
     } else {
         doc["latitude"] = 0.0;
         doc["longitude"] = 0.0;
@@ -240,6 +249,15 @@ void loop() {
     if (prevState != currentState) {
         setFeedback(currentState);
         
+        sendDebugLog("[STATUS] Terjadi perubahan status dari " + prevState + " menjadi " + currentState + "!");
+        if (currentState == "CRITICAL" && !isBuzzerMuted) {
+            sendDebugLog("[BUZZER] Menyala panjang (CRITICAL)");
+        } else if (currentState == "WASPADA" && !isBuzzerMuted) {
+            sendDebugLog("[BUZZER] Menyala putus-putus (WASPADA)");
+        } else if (isBuzzerMuted) {
+            sendDebugLog("[BUZZER] Tidak menyala karena sedang dalam status MUTED.");
+        }
+
         // Langsung paksa publish saat status berubah agar responsif
         sendTelemetry(accX, accY, accZ, pitch, roll, freq, ppv);
         lastTelemetryTime = millis();

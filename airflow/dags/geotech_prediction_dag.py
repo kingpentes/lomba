@@ -92,18 +92,19 @@ def geotech_prediction_dag():
 
         if avg_velocity < 0.05:
             risk_level = 'STABLE'
-        elif avg_velocity < 0.20:
-            risk_level = 'WARNING'
         else:
-            risk_level = 'CRITICAL'
+            # Pergerakan abnormal terdeteksi — mulai WARNING dulu
+            risk_level = 'WARNING'
             
         # 5. FUKUZONO SEJATI: Regresi Linear pada grafik 1/V terhadap Waktu jika lereng bergerak
-        df['velocity'] = df['smooth_angle'].diff() / df['time_elapsed_min'].diff()
-        df_valid = df.dropna().copy()
+        # Buang duplikat timestamp agar diff waktu tidak pernah 0 (mencegah infinity velocity -> 1/v = 0)
+        df_unique = df.drop_duplicates(subset=['time_elapsed_min']).copy()
+        df_unique['velocity'] = df_unique['smooth_angle'].diff() / df_unique['time_elapsed_min'].diff()
+        df_valid = df_unique.dropna().copy()
         df_valid = df_valid[df_valid['velocity'] > 0.001].copy()
 
         r_squared = None
-        if len(df_valid) >= 5 and risk_level in ['WARNING', 'CRITICAL']:
+        if len(df_valid) >= 5 and risk_level == 'WARNING':
             df_valid['inv_velocity'] = 1.0 / df_valid['velocity']
             inv_velocity = df_valid['inv_velocity'].iloc[-1]
             
@@ -120,13 +121,18 @@ def geotech_prediction_dag():
             
             # Syarat Fukuzono: Garis 1/V harus menukik turun (slope negatif)
             if m < -0.001:
+                # time_fail_min adalah X-intercept absolut dari titik nol (record pertama)
                 time_fail_min = -c / m
-                time_left = time_fail_min - df_valid['time_elapsed_min'].iloc[-1]
+                time_left_from_now = time_fail_min - df['time_elapsed_min'].iloc[-1]
                 
-                # Cegah prediksi tidak masuk akal (misal > 30 hari ke depan)
-                if 0 < time_left < (60 * 24 * 30):
-                    estimated_collapse_time = df['recorded_at'].iloc[-1] + timedelta(minutes=time_left)
+                # Cegah prediksi tidak masuk akal (misal > 30 hari ke depan atau sudah runtuh)
+                if 0 < time_left_from_now < (60 * 24 * 30):
+                    # TTF Dihitung persis dari titik nol ditambah waktu menuju keruntuhan
+                    estimated_collapse_time = df['recorded_at'].iloc[0] + timedelta(minutes=time_fail_min)
+                    # TTF berhasil dihitung → eskalasi ke CRITICAL
+                    risk_level = 'CRITICAL'
             
+
         return {
             'node_id': node_id,
             'angular_velocity': float(avg_velocity),
@@ -184,6 +190,20 @@ def geotech_prediction_dag():
             print("ℹ️ Tidak ada kondisi darurat (data normal/stale). Alert Telegram di-skip.")
             return
 
+        # --- LOGIKA COOLDOWN SPAM ---
+        # Baca waktu terakhir kita ngirim chat Fukuzono
+        last_alert_str = Variable.get("last_fukuzono_alert_time", default_var="")
+        if last_alert_str:
+            last_alert_time = datetime.fromisoformat(last_alert_str)
+            # Set cooldown 15 menit (900 detik)
+            if (now - last_alert_time).total_seconds() < 900:
+                print("ℹ️ Masih dalam masa cooldown (15 menit). Alert Telegram di-skip untuk mencegah SPAM.")
+                return
+        
+        # Simpan waktu pengiriman sekarang agar tidak spam ke depannya
+        Variable.set("last_fukuzono_alert_time", now.isoformat())
+        # ----------------------------
+
         token = Variable.get("geoguard_telegram_token", default_var="8889805869:AAGaKNoz1wuh3tHnXtmvgSpxMTRbCzFuYE4")
         chat_id = Variable.get("geoguard_telegram_chat_id", default_var="-1003849589445")
         app_url = Variable.get("geoguard_app_url", default_var="https://winatra.indonesiacentral.cloudapp.azure.com").rstrip('/')
@@ -217,7 +237,7 @@ def geotech_prediction_dag():
             if elev:
                 msg += f"⛰️ <b>Elevasi:</b> {elev} m\n"
             msg += f"🌐 <b>Google Maps:</b> https://www.google.com/maps?q={lat},{lon}\n"
-        msg += f"⏱️ <b>Waktu:</b> {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        msg += f"⏱️ <b>Waktu:</b> {(now + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')} WITA\n\n"
         
         msg += f"📊 <b>HASIL ANALISIS PREDIKSI (FUKUZONO):</b>\n"
         msg += f"• <b>Status Risiko:</b> {result['risk_level']}\n"

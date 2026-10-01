@@ -323,7 +323,7 @@ def task_send_incident(data):
     else:
         # Murni tilt alert karena sensor kemiringan trigger tanpa retakan
         payload["trigger_type"] = "TILT_ALERT"
-        payload["ai_confidence"] = 0.85
+        payload["ai_confidence"] = None
 
     # STEP 4: Kirim foto hasil analisis AI ke Laravel
     files = {}
@@ -390,6 +390,14 @@ def on_message(client, userdata, msg):
     try:
         payload = msg.payload.decode("utf-8")
         data = json.loads(payload)
+
+        pitch = float(data.get("pitch", 0))
+        roll = float(data.get("roll", 0))
+
+        # [FILTER NOISE] Jika sudut kemiringan di atas 90 derajat, itu tidak masuk akal (gimbal lock/error)
+        if abs(pitch) > 90 or abs(roll) > 90:
+            print(f"[MQTT] ⚠️ MENGABAIKAN DATA ERROR (Noise): Pitch={pitch}°, Roll={roll}°")
+            return
 
         status = data.get("ai_classification", "NORMAL")
         print(f"\n[MQTT] Pesan masuk dari {data.get('node_code')} | Status: {status}")

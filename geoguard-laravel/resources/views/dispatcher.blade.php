@@ -96,7 +96,7 @@
                 </div>
             </div>
 
-            <div class="flex-grow space-y-4 relative z-10 border-t border-slate-800 pt-4">
+            <div class="hidden flex-grow space-y-4 relative z-10 border-t border-slate-800 pt-4">
                 <div>
                     <label class="block text-xs font-bold text-slate-500 mb-2 tracking-wider">TELEMETRY MODE</label>
                     <select id="mode_{{ $node->node_code }}" class="w-full bg-slate-950 border border-slate-700 text-slate-300 rounded p-2 focus:ring-cyan-500 focus:border-cyan-500 transition-colors">
@@ -111,7 +111,7 @@
                 <button onclick="setActiveNode('{{ $node->node_code }}')" id="active_btn_{{ $node->node_code }}" class="w-full bg-emerald-700 hover:bg-emerald-600 text-white font-bold py-2.5 px-4 rounded transition shadow-[0_0_15px_rgba(16,185,129,0.15)] border border-emerald-500/50 text-sm">
                     📡 SET AS ACTIVE NODE (HUD)
                 </button>
-                <button onclick="setMode('{{ $node->node_code }}')" id="btn_{{ $node->node_code }}" class="w-full bg-cyan-700 hover:bg-cyan-600 text-white font-bold py-2.5 px-4 rounded transition shadow-[0_0_15px_rgba(6,182,212,0.2)] border border-cyan-500/50 text-sm">
+                <button onclick="setMode('{{ $node->node_code }}')" id="btn_{{ $node->node_code }}" class="hidden w-full bg-cyan-700 hover:bg-cyan-600 text-white font-bold py-2.5 px-4 rounded transition shadow-[0_0_15px_rgba(6,182,212,0.2)] border border-cyan-500/50 text-sm">
                     ⚙️ APPLY TELEMETRY CONFIG
                 </button>
             </div>

@@ -11,3 +11,4 @@ Route::get('/early-warning', [DashboardController::class, 'earlyWarning'])->name
 Route::get('/dispatcher', [DashboardController::class, 'dispatcher'])->name('dispatcher');
 Route::get('/incidents', [IncidentController::class, 'index'])->name('incidents');
 Route::get('/incidents/export', [IncidentController::class, 'export'])->name('incidents.export');
+Route::patch('/incidents/{id}/status', [IncidentController::class, 'updateStatus'])->name('incidents.updateStatus');
